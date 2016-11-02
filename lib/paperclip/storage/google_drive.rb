@@ -1,10 +1,10 @@
-
 require 'active_support/core_ext/hash/keys'
 require 'active_support/inflector/methods'
 require 'active_support/core_ext/object/blank'
 require 'yaml'
 require 'erb'
 require 'google/api_client'
+require 'net/http'
 
 module Paperclip
 
@@ -65,7 +65,7 @@ module Paperclip
               metadata.parents = [{'id' => parent_id}]
             end
             media = Google::APIClient::UploadIO.new( file, mime_type)
-            result = client.execute(
+            result = client.execute!(
               :api_method => drive.files.insert,
               :body_object => metadata,
               :media => media,
@@ -88,23 +88,40 @@ module Paperclip
             folder_id = find_public_folder
             parameters = {'fileId' => file_id,
                           'folder_id' => folder_id }
-            result = client.execute(
+            result = client.execute!(
               :api_method => drive.files.delete,
               :parameters => parameters)
-            if result.status != 204
-              puts "An error occurred: #{result.data['error']['message']}"
-            end
           end
         end
         @queued_for_delete = []
+      end
+
+      def copy_to_local_file(style, local_dest_path)
+        client = google_api_client
+        drive = client.discovered_api('drive', 'v2')
+        searched_id = search_for_title(path(style))
+        metadata =metadata_by_id(searched_id)
+        uri = URI.parse(metadata['downloadUrl'])
+        Net::HTTP.start(uri.host, uri.port, use_ssl: true) do |http|
+          File.open(local_dest_path, "wb") do |file|
+            http.request_get(uri.request_uri, 'Authorization' => "Bearer #{client.authorization.access_token}") do |resp|
+              resp.read_body do |segment|
+                file.write(segment)
+              end
+            end
+          end
+        end
+        true
       end
       #
       def google_api_client
         @google_api_client ||= begin
           assert_required_keys
         # Initialize the client & Google+ API
-          client = Google::APIClient.new(:application_name => 'ppc-gd', :application_version => PaperclipGoogleDrive::VERSION)
-#          client = Google::APIClient.new(:application_name => @google_drive_credentials[:application_name], :application_version => @google_drive_credentials[:application_version])
+          client = Google::APIClient.new(
+            application_name: @google_drive_credentials[:application_name] || 'ppc-gd',
+            application_version: @google_drive_credentials[:application_version] || PaperclipGoogleDrive::VERSION
+          )
           client.authorization.client_id = @google_drive_credentials[:client_id]
           client.authorization.client_secret = @google_drive_credentials[:client_secret]
           client.authorization.access_token = @google_drive_credentials[:access_token]
@@ -160,16 +177,14 @@ module Paperclip
                 'fields' => 'items/id'}
         client = google_api_client
         drive = client.discovered_api('drive', 'v2')
-        result = client.execute(:api_method => drive.children.list,
+        result = client.execute!(:api_method => drive.children.list,
                           :parameters => parameters)
-        if result.status == 200
-          if result.data.items.length > 0
-            result.data.items[0]['id']
-          elsif result.data.items.length == 0
-            nil
-          else
-            nil
-          end
+        if result.data.items.length > 0
+          result.data.items[0]['id']
+        elsif result.data.items.length == 0
+          nil
+        else
+          nil
         end
       end # id or nil
 
@@ -177,13 +192,11 @@ module Paperclip
         if file_id.is_a? String
           client = google_api_client
           drive = client.discovered_api('drive', 'v2')
-          result = client.execute(
+          result = client.execute!(
             :api_method => drive.files.get,
             :parameters => {'fileId' => file_id,
-                            'fields' => 'title, id, webContentLink, labels/trashed' })
-          if result.status == 200
-            result.data # data.class # => Hash
-          end
+                            'fields' => 'title, id, webContentLink, downloadUrl, labels/trashed' })
+          result.data # data.class # => Hash
         end
       end
 
